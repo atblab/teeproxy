@@ -10,8 +10,9 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
-	"net/http/httputil"
+	"net/url"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -20,7 +21,7 @@ var (
 	listen                = flag.String("l", ":8888", "port to accept requests")
 	targetProduction      = flag.String("a", "localhost:8080", "where production traffic goes. http://localhost:8080/production")
 	altTarget             = flag.String("b", "localhost:8081", "where testing traffic goes. response are skipped. http://localhost:8081/test")
-	debug                 = flag.Bool("debug", false, "more logging, showing ignored output")
+	debug                 = flag.Int("debug", 0, "more logging, showing ignored output")
 	productionTimeout     = flag.Int("a.timeout", 3, "timeout in seconds for production traffic")
 	alternateTimeout      = flag.Int("b.timeout", 1, "timeout in seconds for alternate site traffic")
 	productionHostRewrite = flag.Bool("a.rewrite", false, "rewrite the host header when proxying production traffic")
@@ -44,34 +45,45 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		alternativeRequest, productionRequest = DuplicateRequest(req)
 		go func() {
 			defer func() {
-				if r := recover(); r != nil && *debug {
+				if r := recover(); r != nil && *debug >= 1 {
 					fmt.Println("Recovered in f", r)
 				}
 			}()
-			// Open new TCP connection to the server
-			clientTcpConn, err := net.DialTimeout("tcp", h.Alternative, time.Duration(time.Duration(*alternateTimeout)*time.Second))
+
+			targetURLString := h.Alternative + alternativeRequest.URL.String()
+
+			if strings.HasPrefix(strings.ToLower(targetURLString), "http") == false {
+				targetURLString = "http://" + targetURLString
+			}
+
+			targetURL, err := url.Parse(targetURLString)
 			if err != nil {
-				if *debug {
-					fmt.Printf("Failed to connect to %s\n", h.Alternative)
-				}
+				fmt.Printf("Unable to parse target URL: %s\n", err.Error())
 				return
 			}
-			clientHttpConn := httputil.NewClientConn(clientTcpConn, nil) // Start a new HTTP connection on it
-			defer clientHttpConn.Close()                                 // Close the connection to the server
+
+			client := &http.Client{}
+
 			if *alternateHostRewrite {
-				alternativeRequest.Host = h.Alternative
+				alternativeRequest.Host = targetURL.Host
 			}
-			err = clientHttpConn.Write(alternativeRequest) // Pass on the request
+			alternativeRequest.URL = targetURL
+			if *debug >= 2 {
+				fmt.Printf("Processing B request.URL: %s\n", alternativeRequest.URL)
+				fmt.Printf("Processing B request.Method: %s\n", alternativeRequest.Method)
+				fmt.Printf("Processing B request.Proto: %s\n", alternativeRequest.Proto)
+				fmt.Printf("Processing B request.Host: %s\n", alternativeRequest.Host)
+			}
+			resp, err := client.Do(alternativeRequest)
+
+			if *debug >= 3 {
+				fmt.Printf("B status: %s\n", resp.StatusCode)
+			}
+
+			//if err != nil && err != httputil.ErrPersistEOF {
 			if err != nil {
-				if *debug {
-					fmt.Printf("Failed to send to %s: %v\n", h.Alternative, err)
-				}
-				return
-			}
-			_, err = clientHttpConn.Read(alternativeRequest) // Read back the reply
-			if err != nil && err != httputil.ErrPersistEOF {
-				if *debug {
-					fmt.Printf("Failed to receive from %s: %v\n", h.Alternative, err)
+				if *debug >= 1 {
+					fmt.Printf("Failed to Do request: %s\n", err.Error())
 				}
 				return
 			}
@@ -80,30 +92,39 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		productionRequest = req
 	}
 	defer func() {
-		if r := recover(); r != nil && *debug {
+		if r := recover(); r != nil && *debug >= 1 {
 			fmt.Println("Recovered in f", r)
 		}
 	}()
 
-	// Open new TCP connection to the server
-	clientTcpConn, err := net.DialTimeout("tcp", h.Target, time.Duration(time.Duration(*productionTimeout)*time.Second))
+	targetURLString := h.Target + productionRequest.URL.String()
+
+	if strings.HasPrefix(strings.ToLower(targetURLString), "http") == false {
+		targetURLString = "http://" + targetURLString
+	}
+
+	targetURL, err := url.Parse(targetURLString)
 	if err != nil {
-		fmt.Printf("Failed to connect to %s\n", h.Target)
+		fmt.Printf("Unable to parse target URL: %s\n", err.Error())
 		return
 	}
-	clientHttpConn := httputil.NewClientConn(clientTcpConn, nil) // Start a new HTTP connection on it
-	defer clientHttpConn.Close()                                 // Close the connection to the server
+
+	client := &http.Client{}
+	productionRequest.URL = targetURL
 	if *productionHostRewrite {
-		productionRequest.Host = h.Target
+		productionRequest.Host = targetURL.Host
 	}
-	err = clientHttpConn.Write(productionRequest) // Pass on the request
+	if *debug >= 2 {
+		fmt.Printf("Processing A request.URL: %s\n", productionRequest.URL)
+		fmt.Printf("Processing A request.Method: %s\n", productionRequest.Method)
+		fmt.Printf("Processing A request.Proto: %s\n", productionRequest.Proto)
+		fmt.Printf("Processing A request.Host: %s\n", productionRequest.Host)
+	}
+	resp, err := client.Do(productionRequest)
+
+	//if err != nil && err != httputil.ErrPersistEOF {
 	if err != nil {
-		fmt.Printf("Failed to send to %s: %v\n", h.Target, err)
-		return
-	}
-	resp, err := clientHttpConn.Read(productionRequest) // Read back the reply
-	if err != nil && err != httputil.ErrPersistEOF {
-		fmt.Printf("Failed to receive from %s: %v\n", h.Target, err)
+		fmt.Printf("Failed to Do request: %s\n", err.Error())
 		return
 	}
 	defer resp.Body.Close()
@@ -111,7 +132,13 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		w.Header()[k] = v
 	}
 	w.WriteHeader(resp.StatusCode)
+	if *debug >= 3 {
+		fmt.Printf("A status: %s\n", resp.StatusCode)
+	}
 	body, _ := ioutil.ReadAll(resp.Body)
+	if *debug >= 4 {
+		fmt.Printf("A response: %s\n", body)
+	}
 	w.Write(body)
 }
 
