@@ -33,6 +33,7 @@ var (
 	percent               = flag.Float64("p", 100.0, "float64 percentage of traffic to send to alternate (B Side)")
 	tlsPrivateKey         = flag.String("key.file", "", "path to the TLS private key file")
 	tlsCertificate        = flag.String("cert.file", "", "path to the TLS certificate file")
+	version               = flag.Bool("v", false, "show version number")
 )
 
 // handler contains the address of the main Target and the one for the Alternative target
@@ -74,7 +75,7 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				clientTcpConn, err = net.DialTimeout("tcp", alt_url.Host, time.Duration(time.Duration(*alternateTimeout)*time.Second))
 			}
 			if err != nil {
-				log.Error(fmt.Sprintf("Failed to connect to %s", h.Alternative))
+				log.Error(fmt.Sprintf("(B-Side) Failed to connect to host %s for url prefix", alt_url.Host, h.Alternative))
 				return
 			}
 
@@ -97,12 +98,12 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			}).Info("Proxy Request")
 			err = clientHttpConn.Write(alternativeRequest) // Pass on the request
 			if err != nil {
-				log.Error(fmt.Sprintf("Failed to send to %s: %v", h.Alternative, err))
+				log.Error(fmt.Sprintf("(B-Side) Failed to send to %s: %v", h.Alternative, err))
 				return
 			}
 			b_resp, err := clientHttpConn.Read(alternativeRequest) // Read back the reply
 			if err != nil && err != httputil.ErrPersistEOF {
-				log.Error(fmt.Sprintf("Failed to send to %s: %v", h.Alternative, err))
+				log.Error(fmt.Sprintf("(B-Side) Failed to receive from %s: %v", h.Alternative, err))
 				return
 			}
 			log.WithFields(log.Fields{
@@ -138,7 +139,7 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		clientTcpConn, err = net.DialTimeout("tcp", prod_url.Host, time.Duration(time.Duration(*productionTimeout)*time.Second))
 	}
 	if err != nil {
-		log.Error(fmt.Sprintf("A Failed to connect to %s", h.Alternative))
+		log.Error(fmt.Sprintf("(A-Side) Failed to connect to host %s for url prefix", prod_url.Host, h.Target))
 		return
 	}
 
@@ -161,12 +162,12 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}).Info("Proxy Request")
 	err = clientHttpConn.Write(productionRequest) // Pass on the request
 	if err != nil {
-		log.Error(fmt.Sprintf("A Failed to send to %s: %v", h.Target, err))
+		log.Error(fmt.Sprintf("(A-Side) Failed to send to %s: %v", h.Target, err))
 		return
 	}
 	a_resp, err := clientHttpConn.Read(productionRequest) // Read back the reply
 	if err != nil && err != httputil.ErrPersistEOF {
-		log.Error(fmt.Sprintf("A Failed to receive from %s: %v", h.Target, err))
+		log.Error(fmt.Sprintf("(A-Side) Failed to receive from %s: %v", h.Target, err))
 		return
 	}
 	log.WithFields(log.Fields{
