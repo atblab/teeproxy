@@ -188,6 +188,11 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func main() {
 	flag.Parse()
 
+	if *version {
+		fmt.Printf("teeproxy: (cavanaug) 2017-03-07\n")
+		os.Exit(0)
+	}
+
 	log.SetOutput(os.Stdout)
 	// Log as JSON instead of the default ASCII formatter
 	if *jsonLogging {
