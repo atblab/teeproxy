@@ -34,6 +34,7 @@ var (
 	tlsPrivateKey         = flag.String("key.file", "", "path to the TLS private key file")
 	tlsCertificate        = flag.String("cert.file", "", "path to the TLS certificate file")
 	version               = flag.Bool("v", false, "show version number")
+	version_str           = "20170307.3 (cavanaug)"
 )
 
 // handler contains the address of the main Target and the one for the Alternative target
@@ -189,7 +190,7 @@ func main() {
 	flag.Parse()
 
 	if *version {
-		fmt.Printf("teeproxy: (cavanaug) 2017-03-07\n")
+		fmt.Printf("teeproxy version: %s\n", version_str)
 		os.Exit(0)
 	}
 
@@ -258,6 +259,7 @@ func main() {
 	}
 
 	log.WithFields(log.Fields{
+		"version":       version_str,
 		"proxy_port":    *listen,
 		"proxy_percent": *percent,
 		"proxy_tls":     len(*tlsPrivateKey) > 0,
