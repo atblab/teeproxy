@@ -22,19 +22,19 @@ import (
 // Console flags
 var (
 	listen                = flag.String("l", ":8888", "port to accept requests")
-	targetProduction      = flag.String("a", "http://localhost:8080", "where production (A Side) traffic goes. http://localhost:8080/production")
-	altTarget             = flag.String("b", "http://localhost:8081", "where alternate  (B Side) traffic goes. response are skipped. http://localhost:8081/test")
-	debug                 = flag.Int("debug", 0, "more logging, showing ignored output")
-	productionTimeout     = flag.Int("a.timeout", 3, "timeout in seconds for production traffic")
-	alternateTimeout      = flag.Int("b.timeout", 3, "timeout in seconds for alternate site traffic")
+	targetProduction      = flag.String("a", "http://localhost:8080", "where production (A-Side) traffic goes")
+	altTarget             = flag.String("b", "http://localhost:8081", "where alternate (B-Side) traffic goes")
+	debug                 = flag.Int("debug", 0, "debug log level 0=Error, 1=Warning, 2=Info, 3=Debug, 5=VerboseDebug")
+	productionTimeout     = flag.Int("a.timeout", 3, "timeout in seconds for production (A-Side) traffic")
+	alternateTimeout      = flag.Int("b.timeout", 3, "timeout in seconds for alternate (B-Side) traffic")
 	jsonLogging           = flag.Bool("j", false, "write the logs in json for easier processing")
-	productionHostRewrite = flag.Bool("a.rewrite", false, "rewrite the host header when proxying production traffic")
-	alternateHostRewrite  = flag.Bool("b.rewrite", false, "rewrite the host header when proxying alternate site traffic")
+	productionHostRewrite = flag.Bool("a.rewrite", false, "rewrite the host header when proxying production (A-Side) traffic")
+	alternateHostRewrite  = flag.Bool("b.rewrite", false, "rewrite the host header when proxying alternate (B-Side) traffic")
 	percent               = flag.Float64("p", 100.0, "float64 percentage of traffic to send to alternate (B Side)")
 	tlsPrivateKey         = flag.String("key.file", "", "path to the TLS private key file")
 	tlsCertificate        = flag.String("cert.file", "", "path to the TLS certificate file")
 	version               = flag.Bool("v", false, "show version number")
-	version_str           = "20170307.3 (cavanaug)"
+	version_str           = "20170307.4 (cavanaug)"
 )
 
 // handler contains the address of the main Target and the one for the Alternative target
@@ -76,7 +76,12 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				clientTcpConn, err = net.DialTimeout("tcp", alt_url.Host, time.Duration(time.Duration(*alternateTimeout)*time.Second))
 			}
 			if err != nil {
-				log.Error(fmt.Sprintf("(B-Side) Failed to connect to host %s for url prefix", alt_url.Host, h.Alternative))
+				log.WithFields(log.Fields{
+					"uuid":        uid,
+					"side":        "B-Side",
+					"connect_uri": h.Alternative,
+					"error":       err,
+				}).Error("Failed to connect")
 				return
 			}
 
@@ -92,19 +97,48 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				"uuid":                  uid,
 				"side":                  "B-Side",
 				"request_method":        alternativeRequest.Method,
-				"request_path":          alternativeRequest.URL.Path,
+				"request_path":          alternativeRequest.URL.RequestURI(),
 				"request_proto":         alternativeRequest.Proto,
 				"request_host":          alternativeRequest.Host,
 				"request_contentlength": alternativeRequest.ContentLength,
 			}).Info("Proxy Request")
+
+			// If maximal debugging show the original request header & body
+			if *debug > 8 {
+				log.WithFields(log.Fields{
+					"uuid":           uid,
+					"request_header": alternativeRequest.Header,
+					"request_body":   alternativeRequest.Body,
+				}).Info("Proxy Request (Debug)")
+			}
+
 			err = clientHttpConn.Write(alternativeRequest) // Pass on the request
 			if err != nil {
-				log.Error(fmt.Sprintf("(B-Side) Failed to send to %s: %v", h.Alternative, err))
+				log.WithFields(log.Fields{
+					"uuid":           uid,
+					"side":           "B-Side",
+					"request_method": alternativeRequest.Method,
+					"request_path":   alternativeRequest.URL.RequestURI(),
+					"request_proto":  alternativeRequest.Proto,
+					"request_host":   alternativeRequest.Host,
+					"error":          err,
+				}).Error("Failed to send")
 				return
 			}
 			b_resp, err := clientHttpConn.Read(alternativeRequest) // Read back the reply
+			defer b_resp.Body.Close()
 			if err != nil && err != httputil.ErrPersistEOF {
-				log.Error(fmt.Sprintf("(B-Side) Failed to receive from %s: %v", h.Alternative, err))
+				log.WithFields(log.Fields{
+					"uuid":                   uid,
+					"side":                   "B-Side",
+					"request_method":         alternativeRequest.Method,
+					"request_path":           alternativeRequest.URL.RequestURI(),
+					"request_proto":          alternativeRequest.Proto,
+					"request_host":           alternativeRequest.Host,
+					"response_code":          b_resp.StatusCode,
+					"response_contentlength": b_resp.ContentLength,
+					"error":                  err,
+				}).Error("Failed to receive")
 				return
 			}
 			log.WithFields(log.Fields{
@@ -113,6 +147,16 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				"response_code":          b_resp.StatusCode,
 				"response_contentlength": b_resp.ContentLength,
 			}).Info("Proxy Response")
+			if *debug > 4 {
+				b_body, _ := ioutil.ReadAll(b_resp.Body)
+
+				log.WithFields(log.Fields{
+					"uuid":            uid,
+					"side":            "B-Side",
+					"response_header": b_resp.Header,
+					"response_body":   b_body,
+				}).Debug("Proxy Response (Debug)")
+			}
 
 		}()
 	} else {
@@ -140,7 +184,12 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		clientTcpConn, err = net.DialTimeout("tcp", prod_url.Host, time.Duration(time.Duration(*productionTimeout)*time.Second))
 	}
 	if err != nil {
-		log.Error(fmt.Sprintf("(A-Side) Failed to connect to host %s for url prefix", prod_url.Host, h.Target))
+		log.WithFields(log.Fields{
+			"uuid":        uid,
+			"side":        "A-Side",
+			"connect_uri": h.Target,
+			"error":       err,
+		}).Error("Failed to connect")
 		return
 	}
 
@@ -156,24 +205,41 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		"uuid":                  uid,
 		"side":                  "A-Side",
 		"request_method":        productionRequest.Method,
-		"request_path":          productionRequest.URL.Path,
+		"request_path":          productionRequest.URL.RequestURI(),
 		"request_proto":         productionRequest.Proto,
 		"request_host":          productionRequest.Host,
 		"request_contentlength": productionRequest.ContentLength,
 	}).Info("Proxy Request")
 	err = clientHttpConn.Write(productionRequest) // Pass on the request
 	if err != nil {
-		log.Error(fmt.Sprintf("(A-Side) Failed to send to %s: %v", h.Target, err))
+		log.WithFields(log.Fields{
+			"uuid":           uid,
+			"side":           "A-Side",
+			"request_method": productionRequest.Method,
+			"request_path":   productionRequest.URL.RequestURI(),
+			"request_proto":  productionRequest.Proto,
+			"request_host":   productionRequest.Host,
+			"error":          err,
+		}).Error("Failed to send")
 		return
 	}
 	a_resp, err := clientHttpConn.Read(productionRequest) // Read back the reply
 	if err != nil && err != httputil.ErrPersistEOF {
-		log.Error(fmt.Sprintf("(A-Side) Failed to receive from %s: %v", h.Target, err))
+		log.WithFields(log.Fields{
+			"uuid":                   uid,
+			"side":                   "A-Side",
+			"request_method":         productionRequest.Method,
+			"request_path":           productionRequest.URL.RequestURI(),
+			"request_proto":          productionRequest.Proto,
+			"request_host":           productionRequest.Host,
+			"response_code":          a_resp.StatusCode,
+			"response_contentlength": a_resp.ContentLength,
+		}).Error("Failed to receive")
 		return
 	}
 	log.WithFields(log.Fields{
 		"uuid":                   uid,
-		"side":                   "B-Side",
+		"side":                   "A-Side",
 		"response_code":          a_resp.StatusCode,
 		"response_contentlength": a_resp.ContentLength,
 	}).Info("Proxy Response")
@@ -182,8 +248,14 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		w.Header()[k] = v
 	}
 	w.WriteHeader(a_resp.StatusCode)
-	body, _ := ioutil.ReadAll(a_resp.Body)
-	w.Write(body)
+	a_body, _ := ioutil.ReadAll(a_resp.Body)
+	w.Write(a_body)
+	log.WithFields(log.Fields{
+		"uuid":            uid,
+		"side":            "A-Side",
+		"response_header": a_resp.Header,
+		"response_body":   a_body,
+	}).Debug("Proxy Response (Debug)")
 }
 
 func main() {
